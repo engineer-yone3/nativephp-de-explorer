@@ -3,6 +3,8 @@
 namespace App\Http\Controllers;
 
 use Illuminate\Contracts\View\View;
+use Illuminate\Http\JsonResponse;
+use Symfony\Component\Process\Process;
 
 class ExplorerController extends Controller
 {
@@ -30,10 +32,18 @@ class ExplorerController extends Controller
         // クイックアクセスのパスを取得
         $quickAccessPaths = $this->getQuickAccessPaths($defaultUserPath);
         
+        // ルートドライブ/マウントポイントを取得し、各ドライブのツリーを構築
+        $rootDrives = $this->getRootDrives();
+        foreach ($rootDrives as &$drive) {
+            $drive['children'] = $this->getDirectoryTree($drive['path']);
+        }
+        unset($drive);
+        
         return view('explorer.index', [
             'currentPath' => $userPath,
             'items' => $items,
             'quickAccessPaths' => $quickAccessPaths,
+            'rootDrives' => $rootDrives,
         ]);
     }
 
@@ -247,4 +257,344 @@ class ExplorerController extends Controller
 
         return $metadata;
     }
+
+    /**
+     * 指定パスからツリー構造を取得
+     */
+    public function getDirectoryTree(string $basePath, int $maxDepth = 3, int $currentDepth = 0): array
+    {
+        if ($currentDepth >= $maxDepth || !is_dir($basePath) || !is_readable($basePath)) {
+            return [];
+        }
+
+        $children = [];
+
+        try {
+            $files = @scandir($basePath);
+
+            if ($files === false) {
+                return [];
+            }
+
+            foreach ($files as $file) {
+                // . と .. をスキップ
+                if ($file === '.' || $file === '..') {
+                    continue;
+                }
+
+                $filePath = $basePath . DIRECTORY_SEPARATOR . $file;
+
+                // アクセス権限がない場合はスキップ
+                if (!is_readable($filePath)) {
+                    continue;
+                }
+
+                // ディレクトリのみを対象とする
+                if (!is_dir($filePath)) {
+                    continue;
+                }
+
+                $children[] = [
+                    'name' => $file,
+                    'path' => $filePath,
+                    'children' => $this->getDirectoryTree($filePath, $maxDepth, $currentDepth + 1),
+                ];
+            }
+
+            // アルファベット順でソート
+            usort($children, function ($a, $b) {
+                return strcasecmp($a['name'], $b['name']);
+            });
+
+        } catch (\Exception $e) {
+            return [];
+        }
+
+        return $children;
+    }
+
+    /**
+     * OSに応じてルートドライブ/マウントポイントを取得
+     */
+    private function getRootDrives(): array
+    {
+        if (PHP_OS_FAMILY === 'Windows') {
+            return $this->getWindowsDrives();
+        } elseif (PHP_OS_FAMILY === 'Darwin') {
+            return $this->getMacVolumes();
+        } elseif (PHP_OS_FAMILY === 'Linux') {
+            return $this->getLinuxMounts();
+        }
+
+        return [];
+    }
+
+    /**
+     * Windows環境でのドライブを取得
+     */
+    private function getWindowsDrives(): array
+    {
+        $drives = [];
+
+        // A-Z のドライブレターをチェック
+        for ($letter = ord('A'); $letter <= ord('Z'); $letter++) {
+            $driveLetter = chr($letter);
+            $path = $driveLetter . ':' . DIRECTORY_SEPARATOR;
+
+            if (is_dir($path) && is_readable($path)) {
+                $drives[] = [
+                    'name' => $driveLetter . ':',
+                    'path' => $path,
+                    'children' => [],
+                ];
+            }
+        }
+
+        return $drives;
+    }
+
+    /**
+     * macOS環境でのボリュームを取得
+     */
+    private function getMacVolumes(): array
+    {
+        $volumes = [];
+
+        // /Volumes ディレクトリからマウント済みボリュームを取得
+        $volumesPath = '/Volumes';
+        if (is_dir($volumesPath) && is_readable($volumesPath)) {
+            $items = @scandir($volumesPath);
+
+            if ($items !== false) {
+                foreach ($items as $item) {
+                    if ($item === '.' || $item === '..') {
+                        continue;
+                    }
+
+                    $fullPath = $volumesPath . DIRECTORY_SEPARATOR . $item;
+
+                    if (is_dir($fullPath) && is_readable($fullPath)) {
+                        $volumes[] = [
+                            'name' => $item,
+                            'path' => $fullPath,
+                            'children' => [],
+                        ];
+                    }
+                }
+            }
+        }
+
+        // システム用ボリューム（通常は macOS システム自体）
+        $systemPath = '/';
+        if (is_dir($systemPath) && is_readable($systemPath)) {
+            array_unshift($volumes, [
+                'name' => 'Macintosh HD',
+                'path' => $systemPath,
+                'children' => [],
+            ]);
+        }
+
+        return $volumes;
+    }
+
+    /**
+     * Linux環境でのマウント情報を取得
+     */
+    private function getLinuxMounts(): array
+    {
+        $mounts = [];
+
+        // /etc/mtab または /proc/mounts から マウント情報を読取
+        $mountFile = file_exists('/etc/mtab') ? '/etc/mtab' : '/proc/mounts';
+
+        if (file_exists($mountFile)) {
+            $lines = file($mountFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+
+            if ($lines !== false) {
+                foreach ($lines as $line) {
+                    $parts = preg_split('/\s+/', $line);
+
+                    if (count($parts) >= 2) {
+                        $devicePath = $parts[0];
+                        $mountPath = $parts[1];
+
+                        // 実際にマウントされており読取可能か確認
+                        if (is_dir($mountPath) && is_readable($mountPath)) {
+                            // 標準的なファイルシステムのみを対象とする
+                            if ($this->isRelevantLinuxMount($devicePath, $mountPath)) {
+                                $name = basename($mountPath) ?: $mountPath;
+                                // ルートは特別な名前をつける
+                                if ($mountPath === '/') {
+                                    $name = 'System';
+                                }
+
+                                $mounts[] = [
+                                    'name' => $name,
+                                    'path' => $mountPath,
+                                    'children' => [],
+                                ];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ルートが含まれていなければ追加
+        if (empty($mounts) || !array_key_exists(0, $mounts) || $mounts[0]['path'] !== '/') {
+            array_unshift($mounts, [
+                'name' => 'System',
+                'path' => '/',
+                'children' => [],
+            ]);
+        }
+
+        return $mounts;
+    }
+
+    /**
+     * Linux環境で表示対象のマウントか判定
+     */
+    private function isRelevantLinuxMount(string $device, string $mountPath): bool
+    {
+        // 除外するパターン
+        $excludePatterns = [
+            '/sys',
+            '/proc',
+            '/dev/shm',
+            '/run',
+            '/boot/efi',
+            '/snap/',
+        ];
+
+        foreach ($excludePatterns as $pattern) {
+            if (strpos($mountPath, $pattern) === 0) {
+                return false;
+            }
+        }
+
+        // 除外するデバイスパターン
+        $excludeDevices = ['tmpfs', 'devtmpfs', 'sysfs', 'proc', 'cgroup'];
+
+        foreach ($excludeDevices as $excludeDevice) {
+            if (strpos($device, $excludeDevice) !== false) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * ファイルをOSのデフォルトアプリケーションで開く
+     */
+    public function openFile(): JsonResponse
+    {
+        $filePath = request()->input('path');
+
+        // パスの入力検証
+        if (!$filePath || !is_string($filePath)) {
+            return response()->json(['success' => false, 'message' => 'ファイルパスが指定されていません'], 400);
+        }
+
+        // Windows環境では、フォワードスラッシュをバックスラッシュに統一
+        if (PHP_OS_FAMILY === 'Windows') {
+            $filePath = str_replace('/', '\\', $filePath);
+        }
+
+        // ファイルの存在確認
+        if (!file_exists($filePath)) {
+            return response()->json(['success' => false, 'message' => 'ファイルが見つかりません'], 404);
+        }
+
+        // ディレクトリでないことを確認
+        if (is_dir($filePath)) {
+            return response()->json(['success' => false, 'message' => 'フォルダではなくファイルを指定してください'], 400);
+        }
+
+        // ファイルが読取可能か確認
+        if (!is_readable($filePath)) {
+            return response()->json(['success' => false, 'message' => 'ファイルの読み込み権限がありません'], 403);
+        }
+
+        try {
+            // デバッグ: ファイルパスの確認
+            \Log::debug('=== ファイルオープン処理開始 ===', [
+                'filePath' => $filePath,
+                'file_exists' => file_exists($filePath),
+                'is_dir' => is_dir($filePath),
+                'is_readable' => is_readable($filePath),
+                'realpath' => realpath($filePath),
+                'os' => PHP_OS_FAMILY,
+            ]);
+
+            if (PHP_OS_FAMILY === 'Windows') {
+                // Windows環境: proc_open を使用してバックグラウンドで実行
+                // ウィンドウを表示しないように実行
+                $escapedPath = '"' . str_replace('"', '""', $filePath) . '"';
+                
+                $descriptors = [
+                    0 => ['pipe', 'r'],  // stdin
+                    1 => ['pipe', 'w'],  // stdout
+                    2 => ['pipe', 'w'],  // stderr
+                ];
+                
+                $process = proc_open(
+                    'start ' . $escapedPath,
+                    $descriptors,
+                    $pipes,
+                    null,
+                    null,
+                    ['bypass_shell' => false]
+                );
+                
+                if (is_resource($process)) {
+                    // パイプを閉じる
+                    foreach ($pipes as $pipe) {
+                        if (is_resource($pipe)) {
+                            fclose($pipe);
+                        }
+                    }
+                    proc_close($process);
+                    
+                    \Log::debug('Windows ファイルを開きました（proc_open）', [
+                        'filePath' => $filePath,
+                    ]);
+                } else {
+                    throw new \Exception('proc_open failed');
+                }
+            } elseif (PHP_OS_FAMILY === 'Darwin') {
+                // macOS環境: open コマンドでファイルを開く
+                $command = ['open', $filePath];
+                $process = new Process($command);
+                $process->start();
+                
+                \Log::debug('macOS openコマンド', [
+                    'command_array' => $command,
+                ]);
+            } elseif (PHP_OS_FAMILY === 'Linux') {
+                // Linux環境: xdg-open コマンドでファイルを開く
+                $command = ['xdg-open', $filePath];
+                $process = new Process($command);
+                $process->start();
+                
+                \Log::debug('Linux xdg-openコマンド', [
+                    'command_array' => $command,
+                ]);
+            } else {
+                return response()->json(['success' => false, 'message' => 'サポートされていないOS です'], 400);
+            }
+
+            return response()->json(['success' => true, 'message' => 'ファイルを開いています']);
+        } catch (\Exception $e) {
+            // エラーログに記録
+            \Log::error('ファイルオープンエラー', [
+                'error' => $e->getMessage(),
+                'filePath' => $filePath,
+                'os' => PHP_OS_FAMILY,
+            ]);
+            return response()->json(['success' => false, 'message' => 'ファイルを開く際にエラーが発生しました: ' . $e->getMessage()], 500);
+        }
+    }
 }
+

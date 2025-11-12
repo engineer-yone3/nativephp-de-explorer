@@ -8,3 +8,4 @@ Route::get('/', function () {
 });
 
 Route::get('/explorer', [ExplorerController::class, 'index'])->name('explorer.index');
+Route::post('/api/file/open', [ExplorerController::class, 'openFile'])->name('file.open');

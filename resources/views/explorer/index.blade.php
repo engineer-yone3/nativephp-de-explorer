@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>ファイルエクスプローラー</title>
     @vite(['resources/css/app.css', 'resources/js/app.js'])
 </head>
@@ -28,10 +29,15 @@
             <div class="mb-4">
                 <div class="px-4 font-semibold text-xs text-gray-600 uppercase mb-2">クイックアクセス</div>
                 @foreach($quickAccessPaths as $key => $pathInfo)
-                    <div class="px-4 py-2 cursor-pointer transition-colors hover:bg-gray-200 rounded" onclick="navigateTo({{ json_encode($pathInfo['path']) }})">
+                    <div class="px-4 py-2 cursor-pointer transition-colors hover:bg-gray-200 rounded quick-access-item" data-path="{{ json_encode($pathInfo['path']) }}" onclick="navigateTo({{ json_encode($pathInfo['path']) }})">
                         {{ $pathInfo['label'] }}
                     </div>
                 @endforeach
+            </div>
+
+            <div class="mb-4">
+                <div class="px-4 font-semibold text-xs text-gray-600 uppercase mb-2">フォルダー</div>
+                <div id="treeContainer" class="text-sm"></div>
             </div>
         </div>
 
@@ -294,6 +300,42 @@
     <script>
         let viewMode = 'grid';
         const userPath = @json($currentPath);
+        const defaultUserPath = @json($quickAccessPaths['home']['path'] ?? null);
+        
+        // ドライブの展開/折畳み状態をローカルストレージで管理
+        const DRIVE_STATE_KEY = 'explorer_drive_states';
+        
+        // ドライブ状態を取得
+        function getDriveStates() {
+            try {
+                const stored = localStorage.getItem(DRIVE_STATE_KEY);
+                return stored ? JSON.parse(stored) : {};
+            } catch (e) {
+                return {};
+            }
+        }
+        
+        // ドライブ状態を保存
+        function saveDriveStates(states) {
+            try {
+                localStorage.setItem(DRIVE_STATE_KEY, JSON.stringify(states));
+            } catch (e) {
+                console.error('Failed to save drive states:', e);
+            }
+        }
+        
+        // ドライブの展開状態を取得（デフォルトは現在のパスが含まれるドライブのみ展開）
+        function shouldDriveBeExpanded(drivePath, isCurrentDrive) {
+            const states = getDriveStates();
+            
+            // ストレージに状態が保存されていたらそれを使用
+            if (drivePath in states) {
+                return states[drivePath];
+            }
+            
+            // 初回は現在のパスが含まれるドライブのみ展開
+            return isCurrentDrive;
+        }
 
         function setViewMode(mode) {
             viewMode = mode;
@@ -537,9 +579,54 @@
             if (isDirectory) {
                 navigateTo(path);
             } else {
-                // ファイルをデフォルトプログラムで開く
-                console.log('ファイルを開く:', path);
+                // ファイルをOSのデフォルトアプリケーションで開く
+                openFile(path);
             }
+        }
+
+        function openFile(filePath) {
+            // ファイルパスをフォワードスラッシュに統一
+            // Windowsのバックスラッシュをフォワードスラッシュに置換
+            const normalizedPath = filePath.replace(/\\/g, '/');
+            
+            console.log('Original path:', filePath);
+            console.log('Normalized path:', normalizedPath);
+            
+            // APIエンドポイントにPOSTリクエストを送信
+            fetch('/api/file/open', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-TOKEN': getCsrfToken()
+                },
+                body: JSON.stringify({
+                    path: normalizedPath
+                })
+            })
+            .then(response => {
+                if (!response.ok) {
+                    return response.json().then(data => {
+                        throw new Error(data.message || 'ファイルを開く際にエラーが発生しました');
+                    });
+                }
+                return response.json();
+            })
+            .then(data => {
+                if (data.success) {
+                    console.log('ファイルを開きました:', normalizedPath);
+                } else {
+                    console.error('エラー:', data.message);
+                }
+            })
+            .catch(error => {
+                console.error('ファイルを開く際にエラーが発生しました:', error.message);
+            });
+        }
+
+        function getCsrfToken() {
+            // メタタグからCSRFトークンを取得
+            const token = document.querySelector('meta[name="csrf-token"]');
+            return token ? token.getAttribute('content') : '';
         }
 
         function navigateTo(path) {
@@ -585,11 +672,236 @@
             location.reload();
         }
 
+        // ツリーを初期化してレンダリング
+        function renderDirectoryTree() {
+            const drivesData = @json($rootDrives);
+            const currentPath = userPath;
+            const container = document.getElementById('treeContainer');
+            const driveStates = getDriveStates();
+            
+            container.innerHTML = '';
+            
+            if (drivesData && drivesData.length > 0) {
+                // 現在のパスが含まれるドライブを判定
+                const currentDrive = findDriveForPath(drivesData, currentPath);
+                
+                // ドライブごとにツリーを作成
+                drivesData.forEach(drive => {
+                    const driveElement = document.createElement('div');
+                    driveElement.className = 'mb-3';
+                    
+                    // このドライブが現在のパスを含むか判定
+                    const isCurrentDrive = currentDrive && currentDrive.path === drive.path;
+                    
+                    // ドライブの展開状態を判定（保存状態 or 初回は現在のドライブのみ）
+                    const isExpanded = shouldDriveBeExpanded(drive.path, isCurrentDrive);
+                    
+                    // ドライブ名
+                    const driveHeader = document.createElement('div');
+                    driveHeader.className = 'px-2 py-1 cursor-pointer hover:bg-gray-200 rounded transition-colors flex items-center gap-1';
+                    driveHeader.onclick = (e) => {
+                        e.stopPropagation();
+                        navigateTo(drive.path);
+                    };
+                    
+                    const driveToggle = document.createElement('span');
+                    driveToggle.className = 'tree-toggle text-sm select-none';
+                    driveToggle.style.width = '16px';
+                    driveToggle.style.display = 'inline-block';
+                    driveToggle.style.textAlign = 'center';
+                    driveToggle.textContent = isExpanded ? '▼' : '▶';
+                    
+                    const driveIcon = document.createElement('span');
+                    driveIcon.textContent = '💾';
+                    driveIcon.style.marginRight = '0.25rem';
+                    
+                    const driveName = document.createElement('span');
+                    driveName.textContent = drive.name;
+                    driveName.style.flex = '1';
+                    driveName.style.fontWeight = drive.path === currentPath ? 'bold' : 'normal';
+                    driveName.style.color = drive.path === currentPath ? '#2563eb' : 'inherit';
+                    
+                    driveHeader.appendChild(driveToggle);
+                    driveHeader.appendChild(driveIcon);
+                    driveHeader.appendChild(driveName);
+                    
+                    driveElement.appendChild(driveHeader);
+                    
+                    // ドライブの子ツリー
+                    if (drive.children && drive.children.length > 0) {
+                        const childrenContainer = document.createElement('div');
+                        childrenContainer.className = 'tree-children' + (isExpanded ? '' : ' hidden');
+                        
+                        // カレントパスがドライブ配下のどの深さにあるかを計算
+                        // ドライブパスから相対的な深さを算出して、ツリーノードの depth に反映
+                        const normalizePath = (path) => path.replace(/\\/g, '/').replace(/\/$/, '');
+                        const driveNorm = normalizePath(drive.path.toLowerCase());
+                        const currentNorm = normalizePath(currentPath.toLowerCase());
+                        
+                        // ドライブ直下のノードは depth=1 から開始
+                        const treeHtml = renderTreeNodes(drive.children, drive.path, currentPath, 1);
+                        childrenContainer.innerHTML = treeHtml;
+                        
+                        driveElement.appendChild(childrenContainer);
+                        
+                        // トグル機能
+                        driveToggle.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            const isNowHidden = childrenContainer.classList.toggle('hidden');
+                            driveToggle.textContent = isNowHidden ? '▶' : '▼';
+                            
+                            // 状態を保存
+                            driveStates[drive.path] = !isNowHidden;
+                            saveDriveStates(driveStates);
+                        });
+                    }
+                    
+                    container.appendChild(driveElement);
+                });
+                
+                attachTreeEventListeners();
+            }
+        }
+
+        // 指定パスが含まれるドライブを検索
+        function findDriveForPath(drives, currentPath) {
+            const currentLower = currentPath.toLowerCase();
+            
+            // パスセパレータを / に統一する関数
+            const normalizePath = (path) => path.replace(/\\/g, '/').replace(/\/$/, '');
+            const currentNorm = normalizePath(currentLower);
+            
+            // 現在のパスと一致するドライブを最初に探す
+            for (let drive of drives) {
+                const driveNorm = normalizePath(drive.path.toLowerCase());
+                if (currentNorm === driveNorm) {
+                    return drive;
+                }
+            }
+            
+            // 現在のパスがドライブ配下にあるかチェック
+            for (let drive of drives) {
+                const driveNorm = normalizePath(drive.path.toLowerCase());
+                
+                // ドライブパスが / で終わらないように統一してから比較
+                if (currentNorm.startsWith(driveNorm + '/')) {
+                    return drive;
+                }
+            }
+            
+            return null;
+        }
+
+        // ツリーノードのHTMLを再帰的に生成
+        function renderTreeNodes(nodes, parentPath, currentPath, depth = 0) {
+            let html = '<ul class="list-none pl-0" style="margin: 0; padding: 0;">';
+            
+            nodes.forEach(node => {
+                const isExpanded = isPathUnderNode(currentPath, node.path);
+                const hasChildren = node.children && node.children.length > 0;
+                const nodeId = 'tree-' + node.path.replace(/[^a-zA-Z0-9]/g, '_');
+                const indentPx = depth * 16; // 階層ごとに16pxインデント
+                
+                html += `<li class="tree-node" data-path="${node.path}">`;
+                html += `<div class="tree-item flex items-center gap-1 px-2 py-1 cursor-pointer hover:bg-gray-200 rounded transition-colors" style="margin-left: ${indentPx}px;">`;
+                
+                // 展開/折畳みボタン
+                if (hasChildren) {
+                    html += `<span class="tree-toggle text-sm select-none" style="width: 16px; display: inline-block; text-align: center;">`;
+                    html += isExpanded ? '▼' : '▶';
+                    html += `</span>`;
+                } else {
+                    html += `<span style="width: 16px; display: inline-block;"></span>`;
+                }
+                
+                // アイコン
+                html += '<span class="text-base">📁</span>';
+                
+                // ノード名
+                const isCurrentNode = node.path === currentPath;
+                const className = isCurrentNode ? 'font-semibold text-blue-600 flex-1' : 'flex-1';
+                html += `<span class="${className} truncate tree-node-name">${node.name}</span>`;
+                
+                html += '</div>';
+                
+                // 子ノード
+                if (hasChildren) {
+                    const childrenClass = isExpanded ? '' : 'hidden';
+                    html += `<div class="tree-children ${childrenClass}">`;
+                    html += renderTreeNodes(node.children, node.path, currentPath, depth + 1);
+                    html += '</div>';
+                }
+                
+                html += '</li>';
+            });
+            
+            html += '</ul>';
+            return html;
+        }
+
+        // 現在のパスがノード配下かどうかを判定
+        function isPathUnderNode(currentPath, nodePath) {
+            // 大文字小文字を区別しない比較（Windowsパス対応）
+            const currentLower = currentPath.toLowerCase();
+            const nodeLower = nodePath.toLowerCase();
+            
+            // パスセパレータを / に統一し、末尾の / を削除
+            const normalizePath = (path) => path.replace(/\\/g, '/').replace(/\/$/, '');
+            const currentNorm = normalizePath(currentLower);
+            const nodeNorm = normalizePath(nodeLower);
+            
+            if (currentNorm === nodeNorm) {
+                return true;
+            }
+            
+            // ノード配下のパスか判定
+            if (currentNorm.startsWith(nodeNorm + '/')) {
+                return true;
+            }
+            
+            return false;
+        }
+
+        // ツリーイベントリスナーをアタッチ
+        function attachTreeEventListeners() {
+            const toggles = document.querySelectorAll('.tree-toggle');
+            toggles.forEach(toggle => {
+                toggle.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    const treeItem = this.closest('.tree-item');
+                    const childrenContainer = treeItem.parentElement.querySelector('.tree-children');
+                    
+                    if (childrenContainer) {
+                        childrenContainer.classList.toggle('hidden');
+                        this.textContent = childrenContainer.classList.contains('hidden') ? '▶' : '▼';
+                    }
+                });
+            });
+            
+            // ツリーアイテムのクリックイベントリスナー
+            const treeItems = document.querySelectorAll('.tree-item');
+            treeItems.forEach(item => {
+                item.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    const treeNode = this.closest('.tree-node');
+                    let nodePath = treeNode.getAttribute('data-path');
+                    // HTMLエスケープされたバックスラッシュをアンエスケープ
+                    nodePath = nodePath.replace(/\\\\/g, '\\');
+                    if (nodePath) {
+                        navigateTo(nodePath);
+                    }
+                });
+            });
+        }
+
         // ダブルクリックイベントリスナーの設定
         document.addEventListener('DOMContentLoaded', function() {
             // URL パラメータからビューモードを復元
             const urlParams = new URLSearchParams(window.location.search);
             const savedMode = urlParams.get('mode');
+            
+            // ツリーをレンダリング
+            renderDirectoryTree();
             
             // 保存されたモードがあれば適用
             if (savedMode && ['grid', 'list', 'detail'].includes(savedMode)) {
@@ -639,6 +951,11 @@
                     const isDirectory = this.getAttribute('data-is-directory') === 'true';
                     handleItemDblClick(path, isDirectory);
                 });
+            });
+            
+            // アプリケーション終了時にローカルストレージをクリア
+            window.addEventListener('beforeunload', function() {
+                localStorage.removeItem(DRIVE_STATE_KEY);
             });
         });
     </script>
