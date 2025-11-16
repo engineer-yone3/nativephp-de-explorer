@@ -4,7 +4,7 @@ namespace App\Http\Controllers;
 
 use Illuminate\Contracts\View\View;
 use Illuminate\Http\JsonResponse;
-use Symfony\Component\Process\Process;
+use Native\Desktop\Facades\Shell;
 
 class ExplorerController extends Controller
 {
@@ -15,30 +15,30 @@ class ExplorerController extends Controller
     {
         // ユーザープロファイルパスを取得（デフォルト値）
         $defaultUserPath = $this->getUserProfilePath();
-        
+
         // URLのクエリパラメータから指定パスを取得（あればそれを使用）
         $requestPath = request()->query('path', null);
-        
+
         if ($requestPath && is_string($requestPath) && is_dir($requestPath)) {
             $userPath = $requestPath;
         } else {
             // 無効なパスならホームに戻す
             $userPath = $defaultUserPath;
         }
-        
+
         // 指定パスのファイル/フォルダを取得
         $items = $this->getDirectoryItems($userPath);
-        
+
         // クイックアクセスのパスを取得
         $quickAccessPaths = $this->getQuickAccessPaths($defaultUserPath);
-        
+
         // ルートドライブ/マウントポイントを取得し、各ドライブのツリーを構築
         $rootDrives = $this->getRootDrives();
         foreach ($rootDrives as &$drive) {
             $drive['children'] = $this->getDirectoryTree($drive['path']);
         }
         unset($drive);
-        
+
         return view('explorer.index', [
             'currentPath' => $userPath,
             'items' => $items,
@@ -55,29 +55,29 @@ class ExplorerController extends Controller
         if (PHP_OS_FAMILY === 'Windows') {
             // Windows環境でのユーザープロファイルパス
             $userProfile = getenv('USERPROFILE');
-            
+
             if ($userProfile === false) {
                 throw new \RuntimeException('Unable to determine user profile path on Windows. USERPROFILE environment variable not found.');
             }
-            
+
             return $userProfile;
         } elseif (PHP_OS_FAMILY === 'Darwin') {
             // macOS環境
             $home = getenv('HOME');
-            
+
             if ($home === false) {
                 throw new \RuntimeException('Unable to determine home directory on macOS. HOME environment variable not found.');
             }
-            
+
             return $home;
         } elseif (PHP_OS_FAMILY === 'Linux') {
             // Linux環境
             $home = getenv('HOME');
-            
+
             if ($home === false) {
                 throw new \RuntimeException('Unable to determine home directory on Linux. HOME environment variable not found.');
             }
-            
+
             return $home;
         } else {
             throw new \RuntimeException('Unsupported operating system: ' . PHP_OS_FAMILY);
@@ -94,10 +94,10 @@ class ExplorerController extends Controller
         }
 
         $items = [];
-        
+
         try {
             $files = @scandir($path);
-            
+
             if ($files === false) {
                 return [];
             }
@@ -109,14 +109,14 @@ class ExplorerController extends Controller
                 }
 
                 $filePath = $path . DIRECTORY_SEPARATOR . $file;
-                
+
                 // アクセス権限がない場合はスキップ
                 if (!is_readable($filePath)) {
                     continue;
                 }
 
                 $isDir = is_dir($filePath);
-                
+
                 $items[] = [
                     'name' => $file,
                     'path' => $filePath,
@@ -149,7 +149,7 @@ class ExplorerController extends Controller
     private function getFileType(string $filename): string
     {
         $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
-        
+
         return match ($ext) {
             'txt' => 'text',
             'pdf' => 'pdf',
@@ -227,7 +227,7 @@ class ExplorerController extends Controller
     private function getFileMetadata(string $filePath): array
     {
         $stat = @stat($filePath);
-        
+
         if ($stat === false) {
             return [];
         }
@@ -522,10 +522,7 @@ class ExplorerController extends Controller
 
             // ディレクトリでないことを確認
             $isDir = @is_dir($filePath);
-            if ($isDir === false) {
-                return response()->json(['success' => false, 'message' => 'パスの判定に失敗しました'], 400);
-            }
-            if ($isDir === true) {
+            if ($isDir === null || $isDir === true) {
                 return response()->json(['success' => false, 'message' => 'フォルダではなくファイルを指定してください'], 400);
             }
 
@@ -534,72 +531,20 @@ class ExplorerController extends Controller
                 return response()->json(['success' => false, 'message' => 'ファイルの読み込み権限がありません'], 403);
             }
 
-            // デバッグ: ファイルパスの確認
-            \Log::debug('=== ファイルオープン処理開始 ===', [
-                'filePath' => $filePath,
-                'file_exists' => @file_exists($filePath),
-                'is_dir' => @is_dir($filePath),
-                'is_readable' => @is_readable($filePath),
-                'realpath' => @realpath($filePath),
-                'os' => PHP_OS_FAMILY,
-            ]);
+            // NativePHPのShell::openFile()を使用してOS側でファイルを開く
+            $error = Shell::openFile($filePath);
 
-            if (PHP_OS_FAMILY === 'Windows') {
-                // Windows環境: proc_open を使用してバックグラウンドで実行
-                // ウィンドウを表示しないように実行
-                $escapedPath = '"' . str_replace('"', '""', $filePath) . '"';
-                
-                $descriptors = [
-                    0 => ['pipe', 'r'],  // stdin
-                    1 => ['pipe', 'w'],  // stdout
-                    2 => ['pipe', 'w'],  // stderr
-                ];
-                
-                $process = proc_open(
-                    'start ' . $escapedPath,
-                    $descriptors,
-                    $pipes,
-                    null,
-                    null,
-                    ['bypass_shell' => false]
-                );
-                
-                if (is_resource($process)) {
-                    // パイプを閉じる
-                    foreach ($pipes as $pipe) {
-                        if (is_resource($pipe)) {
-                            fclose($pipe);
-                        }
-                    }
-                    proc_close($process);
-                    
-                    \Log::debug('Windows ファイルを開きました（proc_open）', [
-                        'filePath' => $filePath,
-                    ]);
-                } else {
-                    throw new \Exception('proc_open failed');
-                }
-            } elseif (PHP_OS_FAMILY === 'Darwin') {
-                // macOS環境: open コマンドでファイルを開く
-                $command = ['open', $filePath];
-                $process = new Process($command);
-                $process->start();
-                
-                \Log::debug('macOS openコマンド', [
-                    'command_array' => $command,
+            if ($error) {
+                \Log::warning('ファイルオープン時の警告', [
+                    'filePath' => $filePath,
+                    'error' => $error,
                 ]);
-            } elseif (PHP_OS_FAMILY === 'Linux') {
-                // Linux環境: xdg-open コマンドでファイルを開く
-                $command = ['xdg-open', $filePath];
-                $process = new Process($command);
-                $process->start();
-                
-                \Log::debug('Linux xdg-openコマンド', [
-                    'command_array' => $command,
-                ]);
-            } else {
-                return response()->json(['success' => false, 'message' => 'サポートされていないOS です'], 400);
+                return response()->json(['success' => false, 'message' => 'ファイルを開く際にエラーが発生しました: ' . $error], 500);
             }
+
+            \Log::debug('ファイルを開きました', [
+                'filePath' => $filePath,
+            ]);
 
             return response()->json(['success' => true, 'message' => 'ファイルを開いています']);
         } catch (\Exception $e) {
@@ -607,7 +552,6 @@ class ExplorerController extends Controller
             \Log::error('ファイルオープンエラー', [
                 'error' => $e->getMessage(),
                 'filePath' => $filePath ?? 'undefined',
-                'os' => PHP_OS_FAMILY,
             ]);
             return response()->json(['success' => false, 'message' => 'ファイルを開く際にエラーが発生しました: ' . $e->getMessage()], 500);
         }

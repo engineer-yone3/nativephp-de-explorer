@@ -585,23 +585,35 @@
         }
 
         function openFile(filePath) {
-            // Electronのshell.openPath()を使用してファイルを開く
-            if (window.Native && window.Native.shell && typeof window.Native.shell.openPath === 'function') {
-                console.log('Using window.Native.shell.openPath():', filePath);
-                window.Native.shell.openPath(filePath)
-                    .then((error) => {
-                        if (error) {
-                            console.error('ファイルを開く際にエラーが発生しました:', error);
-                        } else {
-                            console.log('ファイルを開きました:', filePath);
-                        }
-                    })
-                    .catch((err) => {
-                        console.error('ファイルを開く際に予期しないエラーが発生しました:', err);
-                    });
-            } else {
-                console.error('window.Native.shell.openPath is not available');
-            }
+            // PHP側のControllerにファイルパスを送信してOS側で開く
+            fetch('/api/file/open', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').getAttribute('content'),
+                },
+                body: JSON.stringify({
+                    path: filePath,
+                }),
+            })
+            .then((response) => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then((data) => {
+                if (data.success) {
+                    console.log('ファイルを開きました:', filePath);
+                } else {
+                    console.error('ファイルを開く際にエラーが発生しました:', data.message);
+                    alert('エラー: ' + data.message);
+                }
+            })
+            .catch((err) => {
+                console.error('ファイルを開く際に予期しないエラーが発生しました:', err);
+                alert('ファイルを開く際にエラーが発生しました: ' + err.message);
+            });
         }
 
         function getCsrfToken() {
