@@ -585,42 +585,23 @@
         }
 
         function openFile(filePath) {
-            // ファイルパスをフォワードスラッシュに統一
-            // Windowsのバックスラッシュをフォワードスラッシュに置換
-            const normalizedPath = filePath.replace(/\\/g, '/');
-            
-            console.log('Original path:', filePath);
-            console.log('Normalized path:', normalizedPath);
-            
-            // APIエンドポイントにPOSTリクエストを送信
-            fetch('/api/file/open', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRF-TOKEN': getCsrfToken()
-                },
-                body: JSON.stringify({
-                    path: normalizedPath
-                })
-            })
-            .then(response => {
-                if (!response.ok) {
-                    return response.json().then(data => {
-                        throw new Error(data.message || 'ファイルを開く際にエラーが発生しました');
+            // Electronのshell.openPath()を使用してファイルを開く
+            if (window.Native && window.Native.shell && typeof window.Native.shell.openPath === 'function') {
+                console.log('Using window.Native.shell.openPath():', filePath);
+                window.Native.shell.openPath(filePath)
+                    .then((error) => {
+                        if (error) {
+                            console.error('ファイルを開く際にエラーが発生しました:', error);
+                        } else {
+                            console.log('ファイルを開きました:', filePath);
+                        }
+                    })
+                    .catch((err) => {
+                        console.error('ファイルを開く際に予期しないエラーが発生しました:', err);
                     });
-                }
-                return response.json();
-            })
-            .then(data => {
-                if (data.success) {
-                    console.log('ファイルを開きました:', normalizedPath);
-                } else {
-                    console.error('エラー:', data.message);
-                }
-            })
-            .catch(error => {
-                console.error('ファイルを開く際にエラーが発生しました:', error.message);
-            });
+            } else {
+                console.error('window.Native.shell.openPath is not available');
+            }
         }
 
         function getCsrfToken() {

@@ -261,12 +261,24 @@ class ExplorerController extends Controller
     /**
      * 指定パスからツリー構造を取得
      */
-    public function getDirectoryTree(string $basePath, int $maxDepth = 3, int $currentDepth = 0): array
+    public function getDirectoryTree(string $basePath, int $maxDepth = 3, int $currentDepth = 0, array &$visitedPaths = []): array
     {
         if ($currentDepth >= $maxDepth || !is_dir($basePath) || !is_readable($basePath)) {
             return [];
         }
 
+        // 実パスを取得して循環参照を防止
+        $realPath = realpath($basePath);
+        if ($realPath === false) {
+            return [];
+        }
+
+        // すでに訪問済みの場合はスキップ（循環参照の防止）
+        if (isset($visitedPaths[$realPath])) {
+            return [];
+        }
+
+        $visitedPaths[$realPath] = true;
         $children = [];
 
         try {
@@ -297,7 +309,7 @@ class ExplorerController extends Controller
                 $children[] = [
                     'name' => $file,
                     'path' => $filePath,
-                    'children' => $this->getDirectoryTree($filePath, $maxDepth, $currentDepth + 1),
+                    'children' => $this->getDirectoryTree($filePath, $maxDepth, $currentDepth + 1, $visitedPaths),
                 ];
             }
 
@@ -490,41 +502,45 @@ class ExplorerController extends Controller
      */
     public function openFile(): JsonResponse
     {
-        $filePath = request()->input('path');
-
-        // パスの入力検証
-        if (!$filePath || !is_string($filePath)) {
-            return response()->json(['success' => false, 'message' => 'ファイルパスが指定されていません'], 400);
-        }
-
-        // Windows環境では、フォワードスラッシュをバックスラッシュに統一
-        if (PHP_OS_FAMILY === 'Windows') {
-            $filePath = str_replace('/', '\\', $filePath);
-        }
-
-        // ファイルの存在確認
-        if (!file_exists($filePath)) {
-            return response()->json(['success' => false, 'message' => 'ファイルが見つかりません'], 404);
-        }
-
-        // ディレクトリでないことを確認
-        if (is_dir($filePath)) {
-            return response()->json(['success' => false, 'message' => 'フォルダではなくファイルを指定してください'], 400);
-        }
-
-        // ファイルが読取可能か確認
-        if (!is_readable($filePath)) {
-            return response()->json(['success' => false, 'message' => 'ファイルの読み込み権限がありません'], 403);
-        }
-
         try {
+            $filePath = request()->input('path');
+
+            // パスの入力検証
+            if (!$filePath || !is_string($filePath)) {
+                return response()->json(['success' => false, 'message' => 'ファイルパスが指定されていません'], 400);
+            }
+
+            // Windows環境では、フォワードスラッシュをバックスラッシュに統一
+            if (PHP_OS_FAMILY === 'Windows') {
+                $filePath = str_replace('/', '\\', $filePath);
+            }
+
+            // ファイルの存在確認
+            if (!@file_exists($filePath)) {
+                return response()->json(['success' => false, 'message' => 'ファイルが見つかりません'], 404);
+            }
+
+            // ディレクトリでないことを確認
+            $isDir = @is_dir($filePath);
+            if ($isDir === false) {
+                return response()->json(['success' => false, 'message' => 'パスの判定に失敗しました'], 400);
+            }
+            if ($isDir === true) {
+                return response()->json(['success' => false, 'message' => 'フォルダではなくファイルを指定してください'], 400);
+            }
+
+            // ファイルが読取可能か確認
+            if (!@is_readable($filePath)) {
+                return response()->json(['success' => false, 'message' => 'ファイルの読み込み権限がありません'], 403);
+            }
+
             // デバッグ: ファイルパスの確認
             \Log::debug('=== ファイルオープン処理開始 ===', [
                 'filePath' => $filePath,
-                'file_exists' => file_exists($filePath),
-                'is_dir' => is_dir($filePath),
-                'is_readable' => is_readable($filePath),
-                'realpath' => realpath($filePath),
+                'file_exists' => @file_exists($filePath),
+                'is_dir' => @is_dir($filePath),
+                'is_readable' => @is_readable($filePath),
+                'realpath' => @realpath($filePath),
                 'os' => PHP_OS_FAMILY,
             ]);
 
@@ -590,7 +606,7 @@ class ExplorerController extends Controller
             // エラーログに記録
             \Log::error('ファイルオープンエラー', [
                 'error' => $e->getMessage(),
-                'filePath' => $filePath,
+                'filePath' => $filePath ?? 'undefined',
                 'os' => PHP_OS_FAMILY,
             ]);
             return response()->json(['success' => false, 'message' => 'ファイルを開く際にエラーが発生しました: ' . $e->getMessage()], 500);
